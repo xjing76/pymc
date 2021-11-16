@@ -48,6 +48,7 @@ from pymc3.distributions.continuous import (
     VonMises,
     Wald,
     Weibull,
+    PolyaGamma
 )
 from pymc3.distributions.discrete import (
     Bernoulli,
@@ -184,4 +185,5 @@ __all__ = [
     "Simulator",
     "fast_sample_posterior_predictive",
     "BART",
+    "PolyaGamma"
 ]

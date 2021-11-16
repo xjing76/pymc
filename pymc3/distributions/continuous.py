@@ -21,6 +21,10 @@ import warnings
 
 import numpy as np
 import theano.tensor as tt
+import theano
+from theano.graph.basic import Apply
+from theano.graph.op import Op
+from theano.tensor.extra_ops import broadcast_shape
 
 from scipy import stats
 from scipy.interpolate import InterpolatedUnivariateSpline
@@ -45,6 +49,21 @@ from pymc3.distributions.distribution import Continuous, draw_values, generate_s
 from pymc3.distributions.special import log_i0
 from pymc3.math import invlogit, log1mexp, log1pexp, logdiffexp, logit
 from pymc3.theanof import floatX
+
+
+try:
+    from polyagamma import polyagamma_cdf, polyagamma_pdf, random_polyagamma
+except ImportError:  # pragma: no cover
+
+    def random_polyagamma(*args, **kwargs):
+        raise RuntimeError("polyagamma package is not installed!")
+
+    def polyagamma_pdf(*args, **kwargs):
+        raise RuntimeError("polyagamma package is not installed!")
+
+    def polyagamma_cdf(*args, **kwargs):
+        raise RuntimeError("polyagamma package is not installed!")
+
 
 __all__ = [
     "Uniform",
@@ -79,6 +98,7 @@ __all__ = [
     "Rice",
     "Moyal",
     "AsymmetricLaplace",
+    "PolyaGamma"
 ]
 
 
@@ -249,6 +269,7 @@ class Uniform(BoundedContinuous):
         """
 
         lower, upper = draw_values([self.lower, self.upper], point=point, size=size)
+
         return generate_samples(
             stats.uniform.rvs, loc=lower, scale=upper - lower, dist_shape=self.shape, size=size
         )
@@ -4440,3 +4461,161 @@ class Moyal(Continuous):
             tt.log(tt.erfc(tt.exp(-scaled / 2) * (2 ** -0.5))),
             0 < sigma,
         )
+
+
+class _PolyaGammaLogDistFunc(Op):
+    __props__ = ("get_pdf",)
+
+    def __init__(self, get_pdf=False):
+        self.get_pdf = get_pdf
+
+    def make_node(self, x, h, z):
+        x = tt.as_tensor_variable(floatX(x))
+        h = tt.as_tensor_variable(floatX(h))
+        z = tt.as_tensor_variable(floatX(z))
+        shape = broadcast_shape(x, h, z)
+        broadcastable = [] if not shape else [False] * len(shape)
+        return Apply(self, [x, h, z], [tt.TensorType(theano.config.floatX, broadcastable)()])
+
+    def perform(self, node, ins, outs):
+        x, h, z = ins[0], ins[1], ins[2]
+        outs[0][0] = (
+            polyagamma_pdf(x, h, z, return_log=True)
+            if self.get_pdf
+            else polyagamma_cdf(x, h, z, return_log=True)
+        ).astype(theano.config.floatX)
+
+
+class PolyaGamma(PositiveContinuous):
+    r"""
+    The Polya-Gamma distribution.
+    The distribution is parametrized by ``h`` (shape parameter) and ``z``
+    (exponential tilting parameter). The pdf of this distribution is
+    .. math::
+       f(x \mid h, z) = cosh^h(\frac{z}{2})e^{-\frac{1}{2}xz^2}f(x \mid h, 0),
+    where :math:`f(x \mid h, 0)` is the pdf of a :math:`PG(h, 0)` variable.
+    Notice that the pdf of this distribution is expressed as an alternating-sign
+    sum of inverse-Gaussian densities.
+    .. math::
+        X = \Sigma_{k=1}^{\infty}\frac{Ga(h, 1)}{d_k},
+    where :math:`d_k = 2(k - 0.5)^2\pi^2 + z^2/2`, :math:`Ga(h, 1)` is a gamma
+    random variable with shape  parameter ``h`` and scale parameter ``1``.
+    .. plot::
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from polyagamma import polyagamma_pdf
+        plt.style.use('seaborn-darkgrid')
+        x = np.linspace(0.01, 5, 500);x.sort()
+        hs = [1., 5., 10., 15.]
+        zs = [0.] * 4
+        for h, z in zip(hs, zs):
+            pdf = polyagamma_pdf(x, h=h, z=z)
+            plt.plot(x, pdf, label=r'$h$ = {}, $z$ = {}'.format(h, z))
+        plt.xlabel('x', fontsize=12)
+        plt.ylabel('f(x)', fontsize=12)
+        plt.legend(loc=1)
+        plt.show()
+    ========  =============================
+    Support   :math:`x \in (0, \infty)`
+    Mean      :math:`dfrac{h}{4} if :math:`z=0`, :math:`\dfrac{tanh(z/2)h}{2z}` otherwise.
+    Variance  :math:`0.041666688h` if :math:`z=0`, :math:`\dfrac{h(sinh(z) - z)(1 - tanh^2(z/2))}{4z^3}` otherwise.
+    ========  =============================
+    Parameters
+    ----------
+    h: float, optional
+        The shape parameter of the distribution (h > 0).
+    z: float, optional
+        The exponential tilting parameter of the distribution.
+    Examples
+    --------
+    .. code-block:: python
+        rng = np.random.default_rng()
+        with pm.Model():
+            x = pm.PolyaGamma('x', h=1, z=5.5)
+        with pm.Model():
+            x = pm.PolyaGamma('x', h=25, z=-2.3, rng=rng, size=(100, 5))
+    References
+    ----------
+    .. [1] Polson, Nicholas G., James G. Scott, and Jesse Windle.
+           "Bayesian inference for logistic models using Pólya–Gamma latent
+           variables." Journal of the American statistical Association
+           108.504 (2013): 1339-1349.
+    .. [2] Windle, Jesse, Nicholas G. Polson, and James G. Scott.
+           "Sampling Polya-Gamma random variates: alternate and approximate
+           techniques." arXiv preprint arXiv:1405.0506 (2014)
+    .. [3] Luc Devroye. "On exact simulation algorithms for some distributions
+           related to Jacobi theta functions." Statistics & Probability Letters,
+           Volume 79, Issue 21, (2009): 2251-2259.
+    .. [4] Windle, J. (2013). Forecasting high-dimensional, time-varying
+           variance-covariance matrices with high-frequency data and sampling
+           Pólya-Gamma random variates for posterior distributions derived
+           from logistic likelihoods.(PhD thesis). Retrieved from
+           http://hdl.handle.net/2152/21842
+    """
+    def __init__(self, h=1.0, z=0.0, *args, **kwargs):
+
+        super().__init__(*args, **kwargs)
+
+        self.h = tt.as_tensor_variable(floatX(h))
+        self.z = tt.as_tensor_variable(floatX(z))
+        moment = bound(tt.max(self.z), 1)
+        self.mode = self.h * self.z/moment**2 + 1
+
+
+        msg = f"The variable {self.h} specified for PolyaGamma has non-positive "
+        msg += "values, making it unsuitable for this parameter."
+        assert tt.all(tt.gt(h, 0.0)), msg
+
+
+    def random(self, point=None, size=None):
+        """
+        Draw random values from Polyagamma distribution distribution.
+
+        Parameters
+        ----------
+        point: dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size: int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+        h, z = draw_values([self.h, self.z], point=point, size=size)
+
+        return random_polyagamma(h, z, size=size, random_state=bg).astype(theano.config.floatX)
+
+    def logp(self, value):
+        """
+        Calculate log-probability of Polya-Gamma distribution at specified value.
+        Parameters
+        ----------
+        value: numeric
+            Value(s) for which log-probability is calculated. If the log
+            probabilities for multiple values are desired the values must be
+            provided in a numpy array.
+        Returns
+        -------
+        TensorVariable
+        """
+        h, z = self.h, self.z
+        return bound(_PolyaGammaLogDistFunc(True)(value, h, z), h > 0, value > 0)
+
+    def logcdf(self,value):
+        """
+        Compute the log of the cumulative distribution function for the
+        Polya-Gamma distribution at the specified value.
+        Parameters
+        ----------
+        value: numeric or np.ndarray or `TensorVariable`
+            Value(s) for which log CDF is calculated. If the log CDF for multiple
+            values are desired the values must be provided in a numpy array.
+        Returns
+        -------
+        TensorVariable
+        """
+        h, z = self.h, self.z
+        return bound(_PolyaGammaLogDistFunc(False)(value, h, z), h > 0, value > 0)

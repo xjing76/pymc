@@ -94,12 +94,28 @@ from pymc3.distributions import (
     ZeroInflatedNegativeBinomial,
     ZeroInflatedPoisson,
     continuous,
+    PolyaGamma,
 )
 from pymc3.math import kronecker, logsumexp
 from pymc3.model import Deterministic, Model, Point
 from pymc3.tests.helpers import select_by_precision
 from pymc3.theanof import floatX
 from pymc3.vartypes import continuous_types
+
+try:
+    from polyagamma import polyagamma_cdf, polyagamma_pdf
+
+    _polyagamma_not_installed = False
+except ImportError:  # pragma: no cover
+
+    _polyagamma_not_installed = True
+
+    def polyagamma_pdf(*args, **kwargs):
+        raise RuntimeError("polyagamma package is not installed!")
+
+    def polyagamma_cdf(*args, **kwargs):
+        raise RuntimeError("polyagamma package is not installed!")
+
 
 SCIPY_VERSION = parse(scipy_version)
 
@@ -987,6 +1003,22 @@ class TestMatchesScipy:
         pt = {"wald": value}
         decimals = select_by_precision(float64=6, float32=1)
         assert_almost_equal(model.fastlogp(pt), logp, decimal=decimals, err_msg=str(pt))
+
+    def test_polyagamma(self):
+        self.check_logp(
+            pm.PolyaGamma,
+            Rplus,
+            {"h": Rplus, "z": R},
+            lambda value, h, z: polyagamma_pdf(value, h, z, return_log=True),
+            decimal=select_by_precision(float64=6, float32=-1),
+        )
+        self.check_logcdf(
+            pm.PolyaGamma,
+            Rplus,
+            {"h": Rplus, "z": R},
+            lambda value, h, z: polyagamma_cdf(value, h, z, return_log=True),
+            decimal=select_by_precision(float64=6, float32=-1),
+        )
 
     def test_beta(self):
         self.check_logp(
